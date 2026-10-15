@@ -155,6 +155,7 @@ namespace TensileLite
                                     .wave_group_m         = solution->sizeMapping.waveGroup[0],
                                     .wave_group_n         = solution->sizeMapping.waveGroup[1],
                                     .prefetch_global_read = solution->sizeMapping.PrefetchGlobalRead,
+                                    .one_lds_buffer       = solution->sizeMapping.OneLDSBuffer,
                                     .source_swap          = solution->sizeMapping.SourceSwap,
                                     .unroll_major_lds_a   = solution->sizeMapping.UnrollMajorLDSA,
                                     .unroll_major_lds_b   = solution->sizeMapping.UnrollMajorLDSB,
