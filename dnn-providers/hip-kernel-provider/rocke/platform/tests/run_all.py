@@ -144,6 +144,11 @@ NATIVE_PARITY_TESTS = (
         "rocke_unsigned_int_ops",
         "native unsigned integer op C API parity",
     ),
+    (
+        "ROCKE_BUFFER_RSRC_HIP_TEST",
+        "rocke_buffer_rsrc_hip",
+        "native buffer descriptor HIP parity",
+    ),
 )
 
 
