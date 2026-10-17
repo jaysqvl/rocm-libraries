@@ -271,6 +271,9 @@ int tuning_cache_replay(rocblaslt_handle                    handle,
  */
 int tuningLastLaunchedIndexForTest();
 
+// Memoised adaptive re-selections held by a TensileDataGemm.
+size_t adaptiveReselectionCount(std::shared_ptr<void> gemmData);
+
 TensileLite::ContractionProblemGemm* ExtractProblemGemm(std::shared_ptr<void>);
 
 // Push the GemmPreference-supplied StreamK tile scheduling mode onto every
