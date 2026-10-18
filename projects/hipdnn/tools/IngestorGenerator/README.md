@@ -87,7 +87,8 @@ arch over `reduction.aot_budget_per_arch` (checked before anything is written),
 `--check-placeholders` findings, an emitted file that cannot be read back, or a template
 error; `2` unusable input: a missing or invalid config, a non-existent `--emitted-root`, an
 `--output-dir` that is not a directory, a non-empty output directory without `--force`,
-a config the renderer rejects, or a bad flag (argparse).
+a config the renderer rejects, `--check-placeholders` on a slotted config (descriptors
+only: nothing to check), or a bad flag (argparse).
 
 ### Extending a live engine
 
@@ -704,6 +705,19 @@ for: `native` (the default when absent) is the shard arch, `generic` its LLVM ge
 processor (`gfx11-generic`, `gfx12-generic`), so one kernel set serves the whole family.
 Any other value is a `ConfigError`; the key is rejected for every other kind. See the
 [packaging reference](../../../../dnn-providers/hip-kernel-provider/descriptor-packaging/README.md).
+
+## Slotted engines: `slots`
+
+A config with a `slots` list describes a slotted engine (RFC 0021): `engine.shared_workspace`
+names the shared-workspace token, each slot declares `name`, `kmd_fields`, `knobs`, `ranker`
+and `specialization`, and every pack names its `slot`. The loader refuses `kmd_fields`,
+`specialization`, `engine.knobs` and a non-`none` `engine.heuristic` beside `slots`, so a
+slotted config declares them per slot. `tests/fixtures/slotted_three_slot.yaml` is the
+reference. A slotted config generates descriptors only: no native stub, census, matcher test or fragments,
+and no provider splice (`generate.py` prints `Descriptors only: no provider splice for slotted
+engines`), and `--check-placeholders` is refused for it (exit 2). The slotted engine's runtime
+behavior, benchmarking and tooling are in the
+[RUNBOOK](../ai/skills/hipdnn-ingestor-engine/RUNBOOK.md#slotted-engines-rfc-0021).
 
 ## The five pre-mint config-loader checks
 
