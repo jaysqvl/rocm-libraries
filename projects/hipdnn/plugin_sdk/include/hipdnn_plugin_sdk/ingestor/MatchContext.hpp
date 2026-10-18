@@ -51,11 +51,17 @@ struct CatalogKey
     /// ranked order is keyed by metric, or a `time` request is served a `tflops` order.
     /// Always a registered name, so it views the registry's static storage.
     std::string_view rankingMetric = hipdnn_data_sdk::utilities::DEFAULT_RANKING_METRIC;
+    /// The slot whose catalog the entry holds (RFC 0021 §9); empty for an unslotted engine's
+    /// catalog and for a slotted engine's engine-wide entries. Explicit init avoids
+    /// -Wmissing-field-initializers on partial CatalogKey{graph, device, version, metric}.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    std::string slot{};
 
     bool operator==(const CatalogKey& other) const noexcept
     {
         return graphId == other.graphId && deviceId == other.deviceId
-               && engineVersion == other.engineVersion && rankingMetric == other.rankingMetric;
+               && engineVersion == other.engineVersion && rankingMetric == other.rankingMetric
+               && slot == other.slot;
     }
 };
 
@@ -78,6 +84,10 @@ struct CatalogKeyHash
         mix(static_cast<size_t>(key.engineVersion.minor));
         mix(static_cast<size_t>(key.engineVersion.patch));
         mix(std::hash<std::string_view>{}(key.rankingMetric));
+        if(!key.slot.empty())
+        {
+            mix(std::hash<std::string_view>{}(key.slot));
+        }
         return hash;
     }
 };

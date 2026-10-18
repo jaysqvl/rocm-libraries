@@ -43,67 +43,9 @@
 #include <hipdnn_test_sdk/utilities/ScopedEnvironmentVariableSetter.hpp>
 #include <hipdnn_test_sdk/utilities/TestUtilities.hpp>
 
+#include "HipStreamWaitFaults.hpp"
 #include "IngestorMocks.hpp"
 #include "KernelIngestorTestFixtures.hpp"
-
-#ifdef HIPDNN_TEST_HIP_STREAM_WAIT_FAILURES
-namespace
-{
-struct HipStreamWaitFaults
-{
-    bool enabled = false;
-    bool unsupported = false;
-    int capabilityQueries = 0;
-    int armCalls = 0;
-    int failFromArm = 0;
-    int rejectedArms = 0;
-    hipError_t lastError = hipSuccess;
-};
-
-thread_local HipStreamWaitFaults gStreamWaitFaults;
-} // namespace
-
-// GNU ld requires these symbol names for test-only HIP call wrapping.
-// NOLINTBEGIN(readability-identifier-naming, bugprone-reserved-identifier)
-extern "C" hipError_t __real_hipStreamWaitValue32(
-    hipStream_t stream, void* ptr, uint32_t value, unsigned int flags, uint32_t mask);
-extern "C" hipError_t
-    __real_hipDeviceGetAttribute(int* value, hipDeviceAttribute_t attribute, int device);
-
-extern "C" hipError_t __wrap_hipStreamWaitValue32(
-    hipStream_t stream, void* ptr, uint32_t value, unsigned int flags, uint32_t mask)
-{
-    if(gStreamWaitFaults.enabled)
-    {
-        ++gStreamWaitFaults.armCalls;
-        if(gStreamWaitFaults.failFromArm > 0
-           && gStreamWaitFaults.armCalls >= gStreamWaitFaults.failFromArm)
-        {
-            // HIP rejects nullptr before enqueueing anything. Exercise a real runtime
-            // error while preserving the valid stream for ordinary event timing.
-            gStreamWaitFaults.lastError
-                = __real_hipStreamWaitValue32(stream, nullptr, value, flags, mask);
-            ++gStreamWaitFaults.rejectedArms;
-            return gStreamWaitFaults.lastError;
-        }
-    }
-    return __real_hipStreamWaitValue32(stream, ptr, value, flags, mask);
-}
-
-extern "C" hipError_t
-    __wrap_hipDeviceGetAttribute(int* value, hipDeviceAttribute_t attribute, int device)
-{
-    if(gStreamWaitFaults.enabled && gStreamWaitFaults.unsupported
-       && attribute == hipDeviceAttributeCanUseStreamWaitValue)
-    {
-        ++gStreamWaitFaults.capabilityQueries;
-        *value = 0;
-        return hipSuccess;
-    }
-    return __real_hipDeviceGetAttribute(value, attribute, device);
-}
-// NOLINTEND(readability-identifier-naming, bugprone-reserved-identifier)
-#endif
 
 /**
  * @file TestBenchmarkPlan.cpp
