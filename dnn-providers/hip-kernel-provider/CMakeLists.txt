@@ -313,8 +313,9 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         "${HIPDNN_BUILD_PLUGIN_ENGINE_DIR}/${HIPKERNELPROVIDER_TEST_DESCRIPTOR_SUBDIR}"
     )
 
-    # Two test descriptor roots, one per test binary. The unit root holds two packed
-    # subtrees and the integration root holds three, all five wired in
+    # Two test descriptor roots, one per test binary, plus a sibling `slotted` fixture root.
+    # The unit root holds two packed subtrees, the integration root three and the `slotted`
+    # root one, all six wired in
     # descriptor-packaging/cmake/HkpPackaging.cmake. The packer stages each authored
     # subtree per architecture: it rewrites an authored hip descriptor to kpack and writes
     # the archive beside it. An embedded_source descriptor names a kernel compiled into a
@@ -331,7 +332,7 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         "${HIPKERNELPROVIDER_TEST_DESCRIPTOR_BUILD_DIR}/${HIPKERNELPROVIDER_TEST_SET_INTEGRATION}")
 
     # Not a test root: the production tree's provenance sidecars install here. It shares
-    # the folder with the test sets, so it must not reuse unit, integration,
+    # the folder with the test sets, so it must not reuse unit, integration, slotted,
     # test_kpack_binary (src/tests/CMakeLists.txt) or the census folder HkpPackaging.cmake
     # installs.
     set(HIPKERNELPROVIDER_TEST_SET_PROVENANCE "provenance")

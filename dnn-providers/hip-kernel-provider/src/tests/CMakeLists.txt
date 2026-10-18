@@ -205,6 +205,12 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         endif()
     endforeach()
 
+    # The packed-load test also reads the slotted fixture's shard (RFC 0021), which sits
+    # beside the unit tree rather than inside it.
+    if(TARGET hkp_packaging_slotted)
+        add_dependencies(hip_kernel_provider_tests hkp_packaging_slotted)
+    endif()
+
     # The census binary additionally reads the production shard, which is wired only
     # where a production root holds descriptors this build packs for. Absent, there is
     # nothing to depend on and no entry is registered against it either.

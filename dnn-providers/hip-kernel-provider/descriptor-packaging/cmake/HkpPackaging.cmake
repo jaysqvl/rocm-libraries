@@ -1754,6 +1754,21 @@ function(hkp_add_packaging)
         PACK_JOBS 1
         ${_root_args})
 
+    # The slotted fixture of the pytest suite (RFC 0021), packed once more so that
+    # the packed-load test reads the packer's real output for a slotted engine. It is a
+    # sibling of the unit and integration trees, not a subtree of one: the unit tree is
+    # walked by hkp_verify_embedded_sources(), and the fixture's embedded sources name
+    # no kernel any binary registers. The wildcard arch packs it for every selected arch.
+    _hkp_wire_root(
+        NAME slotted
+        SOURCE_ROOT "${HKP_FIXTURES}/slotted"
+        ARCHES "${_arches}"
+        HIPCC "${HKP_HIPCC}"
+        ROCM_KPACK_DIR "${_rocm_kpack_dir}"
+        OUT_ROOT "${HIPKERNELPROVIDER_TEST_DESCRIPTOR_BUILD_DIR}/slotted"
+        PACK_JOBS 1
+        ${_root_args})
+
     hkp_register_tests("${_rocm_kpack_dir}" "${HKP_HIPCC}" "${_rocke_comgr_lib}")
     if(HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES)
         include("${HKP_PKG_DIR}/cmake/HkpPackagingProbes.cmake")
