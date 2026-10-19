@@ -220,9 +220,11 @@ typedef struct rocke_isa_backend
     bool (*ds_tr16_b128_spec)(const char* elem_type, rocke_ll_tr16_spec_t* out);
 } rocke_isa_backend_t;
 
-/* Resolve a gfx string to its backend (Python backend_for). Returns NULL and
- * sets *st to ROCKE_ERR_VALUE for a NULL arch (there is no default) and to
- * ROCKE_ERR_KEY for an unknown one. */
+/* Resolve a gfx string to its backend (Python backend_for). Returns the
+ * target's shared, read-only table row, whose datalayout and triple are unset
+ * (a lowering fills them in its own copy, rocke_lower.backend_resolved); safe
+ * to call from any thread. Returns NULL and sets *st to ROCKE_ERR_VALUE for a
+ * NULL arch (there is no default) and to ROCKE_ERR_KEY for an unknown one. */
 const rocke_isa_backend_t* rocke_ll_backend_for(const char* arch, rocke_status_t* st);
 
 /* The two CDNA waitcnt encoders (Python _encode_waitcnt_gfx9_10 /
@@ -396,7 +398,8 @@ struct rocke_lower
 {
     rocke_arena_t arena; /* owns blocks, lines, fresh names    */
     const rocke_kernel_def_t* kernel;
-    const rocke_isa_backend_t* backend;
+    const rocke_isa_backend_t* backend; /* &backend_resolved once running  */
+    rocke_isa_backend_t backend_resolved; /* the target's row + datalayout/triple */
     rocke_llvm_flavor_t flavor; /* resolved (never AUTO once running) */
 
     /* block model */
