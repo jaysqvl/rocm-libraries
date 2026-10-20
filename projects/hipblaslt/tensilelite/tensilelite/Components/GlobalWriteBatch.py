@@ -33,7 +33,7 @@ from rocisa.instruction import BufferAtomicAddF32, BufferAtomicCmpswapB32, \
   SAndB64, SAtomicDec, SAtomicInc, SBarrier, SBfmB32, SBfmB64, SBranch, SCBranchExecNZ, SCBranchExecZ, \
   SCBranchSCC0, SCBranchSCC1, SCBranchVCCNZ, SCmpGtU32, SCmpKGtU32, SCSelectB32, SCmpEQI32, SCmpEQU32, SCmpGtI32, SCmpLeI32, SCmpLeU32, SMinU32, SEndpgm, \
   SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLShiftRightB64, SMovB32, SMovB64, SMulHIU32, SMulI32, \
-  SNop, SOrB32, SOrB64, SOrSaveExecB32, SOrSaveExecB64, SSleep, SStoreB128, SSubI32, SSubU32, \
+  SNop, SOrB32, SOrB64, SOrSaveExecB32, SOrSaveExecB64, SSleep, SSubI32, SSubU32, \
   SSwapPCB64, SWaitCnt, SWaitAlu, VAShiftRightI32, VAddCCOU32, VAddCOU32, VAddF32, VAddF64, \
   VAddI32, VAddPKF16, VAddPKF32, VAddU32, VBfeI32, VCmpEQU32, VCmpGEI32, VCmpGtU32, \
   VCmpNeU32, VCmpNeU64, VCndMaskB32, VCvtBF8toF32, VCvtF16toF32, VCvtF32toF16, VCvtF32toI32, \
@@ -74,7 +74,7 @@ def _scmpGtU32(writer, src, imm, comment=""):
         return module
 
 def emitFusedA2AGate(module, kw, localLabelName, amTilesSgpr=None):
-  """Emit the runtime FusedGemmA2A PUSH/local dispatch gate into `module`:
+  """Emit the runtime FusedA2A=GemmA2A PUSH/local dispatch gate into `module`:
   branch to localLabelName when WorkGroup0 >= AM_tiles (local WG), else fall
   through (PUSH WG). AM_tiles = FusedAM >> log2(MT0).
 
@@ -507,7 +507,7 @@ class GlobalWriteBatchWriter:
     self._epilog(module)
     # A WG computes its whole tile across all batches, so the last batch is where
     # the tile is done and every PUSH store of this WG has been issued.
-    if self.kernel["ProblemType"]["FusedGemmA2A"] and self.batchIdx == self.numBatches - 1:
+    if self.kernel["ProblemType"]["FusedA2A"] == "GemmA2A" and self.batchIdx == self.numBatches - 1:
       self._emitFusedA2AHandshake(module)
     # CompactLoopStore CLS countdown tail: emit countdown + branch + s_endpgm at
     # END of the CLS-loop body (= last batch of batchesPerCLSBody). Gated by
@@ -1751,7 +1751,7 @@ class GlobalWriteBatchWriter:
     # move is an SDMA copy issued afterwards, not a CU store.  Those stores must bypass
     # L2 (sc1) because gfx950's L2 is coherent only within one XCD while the SDMA engine
     # reads from HBM -- an L2-resident tile would be copied stale.
-    fusedA2APushPass = bool(self.kernel["ProblemType"]["FusedGemmA2A"]) and \
+    fusedA2APushPass = self.kernel["ProblemType"]["FusedA2A"] == "GemmA2A" and \
                        self.parentWriter.states.fusedA2ADispatchMode == "PUSH"
 
     if is16bitSubtile:
@@ -2674,7 +2674,7 @@ class GlobalWriteBatchWriter:
     leaves ALREADY IN PACKET ELEMENTS while outRectYS stays in ROWS, the
     hardware not scaling y.  outNShardPkS is both dst_pitch and rect_x, the
     same nShard.  Divisibility by the packet element is a
-    precondition (the FusedA2AShape predicate); a non-multiple truncates here.
+    precondition (the GemmA2AShape predicate); a non-multiple truncates here.
 
     The two shifts use different amounts: elements->bytes uses D_ELEMENT_LOG2,
     elements->packet-elements uses packetElementLog2 minus it.  Conflating them
@@ -2786,7 +2786,7 @@ class GlobalWriteBatchWriter:
     The four packet coordinates are FOLDED into the 64-bit base addresses by
     _fusedA2AComputeCopyFields and emitted as literal 0, leaving N unconstrained.
     What still has to fit -- rect_x, rect_y, src_pitch -- is packed unmasked, so
-    an over-range value corrupts a neighbouring field. The FusedA2AShape predicate
+    an over-range value corrupts a neighbouring field. The GemmA2AShape predicate
     bounds rect_x and src_pitch; the MacroTile1 limit in Solution.py bounds rect_y.
 
     Args:
@@ -2819,12 +2819,11 @@ class GlobalWriteBatchWriter:
                               shiftHex=int(log2(CURSOR_PAIR_BYTES)),
                               comment="cursor pair byte offset = dst_rank * %d" % CURSOR_PAIR_BYTES))
 
-    # --- the counter buffer was zeroed for this launch. ---
-    ring.emitLazyInitCursors(module, kw, "FusedPeerGroupPtr", "FusedCounterPtr", cursorOffSgpr)
-
-    # --- seed the private room-check cache from the live hardware rptr. ---
+    # --- the counter buffer was zeroed for this launch; seed the private
+    #     room-check cache from the live hardware rptr. ---
     cachedIdxSgpr = kw.sgprPool.checkOutAligned(2, 2, tag="fusedA2A_sdmaCachedIdx", preventOverflow=False)
-    ring.emitRefreshCache(module, kw, "FusedPeerGroupPtr", cachedIdxSgpr)
+    ring.emitSeedCursorsAndCache(module, kw, "FusedPeerGroupPtr", "FusedCounterPtr",
+                                 cursorOffSgpr, cachedIdxSgpr)
 
     # --- destination base: peer_recvPtr[dst_rank], the upper pair of the quad the
     #     caller loaded.  Folded in place; the caller reloads the quad per issue. ---
@@ -3024,9 +3023,11 @@ class GlobalWriteBatchWriter:
     #     emission order below reads as the structure it implements.  Sub-Modules
     #     render transparently. ---
     from .Signature import (FUSED_A2A_COUNTER1_OFFSET, FUSED_A2A_COUNTER2_OFFSET,
-                            FUSED_A2A_COUNTER3_OFFSET, FUSED_A2A_DRAIN_RECV,
+                            FUSED_A2A_COUNTER3_OFFSET, FUSED_A2A_CURSOR_BYTES,
+                            FUSED_A2A_DRAIN_RECV,
                             FUSED_A2A_DRAIN_SEND, FUSED_A2A_OUTBOUND_OFFSET,
                             fusedA2AKernArgLayout)
+    from .SdmaRingEmitter import SdmaRingEmitter
     layout = fusedA2AKernArgLayout()
     fusedBase = kw.states.fusedA2AKernArgBase
     mt0 = self.kernel["MacroTile0"]
@@ -3393,19 +3394,7 @@ class GlobalWriteBatchWriter:
     kw.sgprPool.checkIn(targetSgpr)
     kw.sgprPool.checkIn(myRankSgpr)
 
-    cursorZeroSgpr = kw.sgprPool.checkOutAligned(
-        4, 4, tag="fusedA2A_cursorZero", preventOverflow=False)
-    for i in range(4):
-        module.add(SMovB32(dst=sgpr(cursorZeroSgpr + i), src=0,
-                           comment="fused-A2A: zero pattern for the cursor region"))
-    for off in range(0, FUSED_A2A_COUNTER2_OFFSET, 16):
-        module.add(SStoreB128(src=sgpr(cursorZeroSgpr, 4),
-                              base=sgpr("FusedCounterPtr", 2),
-                              soffset=hex(off),
-                              smem=SMEMModifiers(glc=True),
-                              comment="fused-A2A: clear SDMA cursors [%d:%d)"
-                                      % (off, off + 16)))
-    kw.sgprPool.checkIn(cursorZeroSgpr)
+    SdmaRingEmitter.emitClearCursors(module, kw, "FusedCounterPtr", FUSED_A2A_CURSOR_BYTES)
 
     # Restore full EXEC for the CLS look-ahead after the handshake (emit():
     # emitCoord1Advance issues a vector VAddCOU32 on coord1).  It sits AFTER
