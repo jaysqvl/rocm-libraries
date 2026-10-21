@@ -6444,6 +6444,34 @@ INSTANTIATE_TEST_SUITE_P(
             },
             "trained_against names kmds, but the ranker of slot 'dkdv' must name its own "
             "slot's kmd"},
+        RankerProvenanceCase{"names_another_ued",
+                             [](nlohmann::json& trained, Documents& documents) {
+                                 trained["ued"] = dependencyOf(documentById(
+                                     documents, ".kmd.json", slotUuid('1', SLOT_KMD_DKDV)));
+                             },
+                             "incompatible UED identity or semantic revision"},
+        RankerProvenanceCase{
+            "names_no_descriptor_set",
+            [](nlohmann::json& trained, Documents&) {
+                trained = {{"selector_revision", "test-provider/1.0"}};
+            },
+            "trained_against records no descriptor set, which a model bound to a UED must"},
+        // A matcher only the prep pack uses is not the dkdv ranker's: its UMD check covers the
+        // ranker's own slot alone.
+        RankerProvenanceCase{
+            "names_another_slots_matcher",
+            [](nlohmann::json& trained, Documents& documents) {
+                const auto matcher = slotUuid('1', 0x0A);
+                documents.push_back(TestDocument{".umd.json",
+                                                 nlohmann::json{{"version", "1.0"},
+                                                                {"id", matcher},
+                                                                {"name", "prep kernel block"},
+                                                                {"scope", "kernel"},
+                                                                {"match_symbol", KERNEL_SYMBOL}}});
+                slotPack(documents, "prep").at("matchers").push_back(matcher);
+                trained["umd"].push_back(nlohmann::json{{"id", matcher}, {"revision", "1.0"}});
+            },
+            "incompatible UMD identity or semantic revision"},
         RankerProvenanceCase{
             "reads_a_workspace_token",
             [](nlohmann::json&, Documents& documents) {
@@ -6458,44 +6486,6 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<RankerProvenanceCase>& info) {
         return pascalCase(info.param.name);
     });
-
-/// A 1.0 UHD naming slot provenance is mislabelled: the form exists from 1.1, so it is rejected
-/// whole rather than read as 1.1.
-TEST(TestDescriptorLoader, RejectsAFormat10UhdNamingSlotProvenance)
-{
-    for(const bool useKmds : {false, true})
-    {
-        const hipdnn_test_sdk::utilities::ScopedDirectory dir(
-            uniqueDirectory(useKmds ? "uhd_1_0_kmds" : "uhd_1_0_slot"));
-        auto recorder
-            = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-        auto documents = makeSlottedDocuments('1', "test:uhd_1_0");
-        auto trained = trainedAgainstWithoutKmd(documents);
-        if(useKmds)
-        {
-            trained["kmds"] = kmdsOf(documents, {{"dkdv", SLOT_KMD_DKDV}});
-        }
-        else
-        {
-            trained["kmd"]
-                = dependencyOf(documentById(documents, ".kmd.json", slotUuid('1', SLOT_KMD_DKDV)));
-            trained["slot"] = "dkdv";
-        }
-        documentById(documents, ".uhd.json", slotUuid('1', SLOT_UHD_DKDV))["trained_against"]
-            = trained;
-        writeDocuments(dir.path(), documents);
-
-        const auto sets = loadFrom(dir.path());
-
-        ASSERT_EQ(sets.size(), 1u);
-        EXPECT_TRUE(recorder.hasLogContaining(
-            HIPDNN_SEV_ERROR, "trained_against uses slot provenance ('slot' or 'kmds') in"))
-            << useKmds;
-        EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR, "which requires UHD version 1.1"))
-            << useKmds;
-        EXPECT_TRUE(sets.front().slots[1].heuristicsByMetric.empty());
-    }
-}
 
 /// An unslotted engine has no slot to name, so a model recording one cannot be its model.
 TEST(TestDescriptorLoader, DisablesAnUnslottedEnginesRankerNamingASlot)
@@ -6564,110 +6554,90 @@ TEST_F(TestDescriptorLoaderSlottedEstimate, LoadsAModelNamingEverySlotsKmd)
     EXPECT_EQ(sets.front().enginePredictionsByMetric.count("tflops"), 1u);
 }
 
-TEST_F(TestDescriptorLoaderSlottedEstimate, RefusesTheSingleKmdForm)
+struct SlottedEstimateRefusal
 {
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const auto sets = load("estimate_kmd", [](nlohmann::json& trained, Documents& documents) {
-        trained["kmd"]
-            = dependencyOf(documentById(documents, ".kmd.json", slotUuid('1', SLOT_KMD_PREP)));
-    });
-
-    ASSERT_EQ(sets.size(), 1u);
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR,
-        "a slotted engine's predict_engine model must name every slot's KMD in kmds"));
-    EXPECT_TRUE(sets.front().enginePredictionsByMetric.empty());
-    EXPECT_EQ(sets.front().unavailableEnginePredictionArches.at("tflops").count("default"), 1u);
-}
-
-TEST_F(TestDescriptorLoaderSlottedEstimate, RefusesAModelMissingASlot)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const auto sets = load("estimate_missing", [](nlohmann::json& trained, Documents& documents) {
-        trained["kmds"] = kmdsOf(documents, {{"prep", SLOT_KMD_PREP}, {"dkdv", SLOT_KMD_DKDV}});
-    });
-
-    ASSERT_EQ(sets.size(), 1u);
-    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR,
-                                          "trained_against kmds does not name slot 'dq'"));
-    EXPECT_TRUE(sets.front().enginePredictionsByMetric.empty());
-}
+    std::string name;
+    std::function<void(nlohmann::json& trained, Documents&)> edit;
+    std::string message;
+};
 
 /// The slotted engine's model must name exactly the slots the engine declares, each at a KMD
 /// identity and revision the slot's schema satisfies; every refusal disables the estimate.
-TEST_F(TestDescriptorLoaderSlottedEstimate, RefusesAModelNamingAnUndeclaredSlot)
+class TestDescriptorLoaderSlottedEstimateRefusal
+    : public TestDescriptorLoaderSlottedEstimate,
+      public ::testing::WithParamInterface<SlottedEstimateRefusal>
+{
+};
+
+TEST_P(TestDescriptorLoaderSlottedEstimateRefusal, DisablesTheEstimateAndKeepsTheEngine)
 {
     auto recorder
         = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const auto sets
-        = load("estimate_undeclared", [](nlohmann::json& trained, Documents& documents) {
-              trained["kmds"]
-                  = kmdsOf(documents,
-                           {{"prep", SLOT_KMD_PREP}, {"dkdv", SLOT_KMD_DKDV}, {"dq", SLOT_KMD_DQ}});
-              auto extra = trained["kmds"][0];
-              extra["slot"] = "epilogue";
-              trained["kmds"].push_back(std::move(extra));
-          });
+    const auto sets = load("estimate_" + GetParam().name, GetParam().edit);
 
     ASSERT_EQ(sets.size(), 1u);
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR,
-        "trained_against kmds names slot 'epilogue', which the engine does not declare"));
+    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR, GetParam().message));
     EXPECT_TRUE(sets.front().enginePredictionsByMetric.empty());
     EXPECT_EQ(sets.front().unavailableEnginePredictionArches.at("tflops").count("default"), 1u);
 }
 
-TEST_F(TestDescriptorLoaderSlottedEstimate, RefusesASlotsKmdAtAnIncompatibleRevision)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const auto sets = load("estimate_revision", [](nlohmann::json& trained, Documents& documents) {
-        trained["kmds"] = kmdsOf(
-            documents, {{"prep", SLOT_KMD_PREP}, {"dkdv", SLOT_KMD_DKDV}, {"dq", SLOT_KMD_DQ}});
-        trained["kmds"][1]["revision"] = "9.0";
-    });
-
-    ASSERT_EQ(sets.size(), 1u);
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR, "incompatible KMD identity or semantic revision for slot 'dkdv'"));
-    EXPECT_TRUE(sets.front().enginePredictionsByMetric.empty());
-}
-
-TEST_F(TestDescriptorLoaderSlottedEstimate, RefusesASlotNamedWithAnotherSlotsKmd)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const auto sets = load("estimate_swapped", [](nlohmann::json& trained, Documents& documents) {
-        trained["kmds"] = kmdsOf(
-            documents, {{"prep", SLOT_KMD_PREP}, {"dkdv", SLOT_KMD_DQ}, {"dq", SLOT_KMD_DKDV}});
-    });
-
-    ASSERT_EQ(sets.size(), 1u);
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR, "incompatible KMD identity or semantic revision for slot 'dkdv'"));
-    EXPECT_TRUE(sets.front().enginePredictionsByMetric.empty());
-}
-
-TEST_F(TestDescriptorLoaderSlottedEstimate, RefusesASingleSlotBesideTheKmds)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    // `slot` beside a `kmd` is a slot ranker's form; a slotted engine's model must use `kmds`.
-    const auto sets = load("estimate_slot", [](nlohmann::json& trained, Documents& documents) {
-        trained["kmd"]
-            = dependencyOf(documentById(documents, ".kmd.json", slotUuid('1', SLOT_KMD_DKDV)));
-        trained["slot"] = "dkdv";
-    });
-
-    ASSERT_EQ(sets.size(), 1u);
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR,
-        "trained_against names a single slot, but a slotted engine's predict_engine model must "
-        "name every slot's KMD in kmds"));
-    EXPECT_TRUE(sets.front().enginePredictionsByMetric.empty());
-    EXPECT_EQ(sets.front().unavailableEnginePredictionArches.at("tflops").count("default"), 1u);
-}
+INSTANTIATE_TEST_SUITE_P(
+    Refusal,
+    TestDescriptorLoaderSlottedEstimateRefusal,
+    ::testing::Values(
+        SlottedEstimateRefusal{
+            "RefusesTheSingleKmdForm",
+            [](nlohmann::json& trained, Documents& documents) {
+                trained["kmd"] = dependencyOf(
+                    documentById(documents, ".kmd.json", slotUuid('1', SLOT_KMD_PREP)));
+            },
+            "a slotted engine's predict_engine model must name every slot's KMD in kmds"},
+        SlottedEstimateRefusal{"RefusesAModelMissingASlot",
+                               [](nlohmann::json& trained, Documents& documents) {
+                                   trained["kmds"]
+                                       = kmdsOf(documents,
+                                                {{"prep", SLOT_KMD_PREP}, {"dkdv", SLOT_KMD_DKDV}});
+                               },
+                               "trained_against kmds does not name slot 'dq'"},
+        SlottedEstimateRefusal{
+            "RefusesAModelNamingAnUndeclaredSlot",
+            [](nlohmann::json& trained, Documents& documents) {
+                trained["kmds"] = kmdsOf(
+                    documents,
+                    {{"prep", SLOT_KMD_PREP}, {"dkdv", SLOT_KMD_DKDV}, {"dq", SLOT_KMD_DQ}});
+                auto extra = trained["kmds"][0];
+                extra["slot"] = "epilogue";
+                trained["kmds"].push_back(std::move(extra));
+            },
+            "trained_against kmds names slot 'epilogue', which the engine does not declare"},
+        SlottedEstimateRefusal{"RefusesASlotNamedWithAnotherSlotsKmd",
+                               [](nlohmann::json& trained, Documents& documents) {
+                                   trained["kmds"] = kmdsOf(documents,
+                                                            {{"prep", SLOT_KMD_PREP},
+                                                             {"dkdv", SLOT_KMD_DQ},
+                                                             {"dq", SLOT_KMD_DKDV}});
+                               },
+                               "incompatible KMD identity or semantic revision for slot 'dkdv'"},
+        SlottedEstimateRefusal{"RefusesASlotsKmdAtAnIncompatibleRevision",
+                               [](nlohmann::json& trained, Documents& documents) {
+                                   trained["kmds"] = kmdsOf(documents,
+                                                            {{"prep", SLOT_KMD_PREP},
+                                                             {"dkdv", SLOT_KMD_DKDV},
+                                                             {"dq", SLOT_KMD_DQ}});
+                                   trained["kmds"][1]["revision"] = "9.0";
+                               },
+                               "incompatible KMD identity or semantic revision for slot 'dkdv'"},
+        SlottedEstimateRefusal{
+            "RefusesASingleSlotBesideTheKmds",
+            [](nlohmann::json& trained, Documents& documents) {
+                // `slot` beside a `kmd` is a slot ranker's form; a slotted engine's model must
+                // use `kmds`.
+                trained["kmd"] = dependencyOf(
+                    documentById(documents, ".kmd.json", slotUuid('1', SLOT_KMD_DKDV)));
+                trained["slot"] = "dkdv";
+            },
+            "trained_against names a single slot, but a slotted engine's predict_engine model must "
+            "name every slot's KMD in kmds"}),
+    [](const ::testing::TestParamInfo<SlottedEstimateRefusal>& info) { return info.param.name; });
 
 #endif // HIPDNN_ENABLE_KERNEL_INGESTOR

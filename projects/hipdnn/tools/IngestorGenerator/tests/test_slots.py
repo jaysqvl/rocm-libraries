@@ -292,71 +292,183 @@ def _expect(tmp_path, mutate, message):
         _load(tmp_path, mutate)
 
 
-def test_selection_members_may_not_sit_beside_slots(tmp_path):
-    _expect(
-        tmp_path,
+def _rename_prep(raw, name):
+    raw["slots"][0]["name"] = name
+    raw["packs"][0]["slot"] = name
+
+
+def _drop_prep_pack(raw):
+    raw["packs"] = [p for p in raw["packs"] if p["slot"] != "prep"]
+
+
+# Each row mutates the three-slot config and names the config error that refuses it; the
+# message fragment is the loader's wording for the rule.
+REFUSALS = [
+    (
+        "kmd_fields_beside_slots",
         lambda raw: raw.update(kmd_fields=[{"name": "x", "type": "int"}]),
         r"key 'kmd_fields' must not appear beside 'slots'",
-    )
-    _expect(
-        tmp_path,
+    ),
+    (
+        "engine_knobs_beside_slots",
         lambda raw: raw["engine"].update(knobs=["block_m"]),
         r"key 'engine.knobs' must not appear beside 'slots'",
-    )
-    _expect(
-        tmp_path,
+    ),
+    (
+        "specialization_beside_slots",
         lambda raw: raw.update(specialization={"metadata_fields": []}),
         r"key 'specialization' must not appear beside 'slots'",
-    )
-    _expect(
-        tmp_path,
+    ),
+    (
+        "heuristic_beside_slots",
         lambda raw: raw["engine"].update(heuristic="native"),
         r"engine.heuristic 'native' must not appear beside 'slots'",
-    )
-
-
-def test_an_empty_slot_list_is_refused(tmp_path):
-    _expect(
-        tmp_path,
+    ),
+    (
+        "empty_slot_list",
         lambda raw: raw.update(slots=[]),
         r"'slots' must declare at least one slot",
-    )
+    ),
+    (
+        "name_uppercase",
+        lambda raw: _rename_prep(raw, "Prep"),
+        r"slot name 'Prep' in slots must match \^\[a-z\]\[a-z0-9_\]\*\$",
+    ),
+    (
+        "name_digit_start",
+        lambda raw: _rename_prep(raw, "9p"),
+        r"slot name '9p' in slots must match",
+    ),
+    (
+        "name_global",
+        lambda raw: _rename_prep(raw, "global"),
+        r"slot name 'global' in slots is reserved for engine-wide knobs",
+    ),
+    (
+        "duplicate_name",
+        lambda raw: raw["slots"][2].update(name="dkdv"),
+        r"slot name 'dkdv' is declared more than once",
+    ),
+    (
+        "pack_without_slot",
+        lambda raw: raw["packs"][0].pop("slot"),
+        r"pack 'prep' declares no 'slot', which every pack of a slotted engine must",
+    ),
+    (
+        "pack_names_undeclared_slot",
+        lambda raw: raw["packs"][0].update(slot="nope"),
+        r"pack 'prep' names slot 'nope', which this config does not declare",
+    ),
+    (
+        "ws_token_bare",
+        lambda raw: raw["engine"].update(shared_workspace="bytes"),
+        r"engine.shared_workspace .* must name a bound token under the 'ws.' root",
+    ),
+    (
+        "ws_token_root_only",
+        lambda raw: raw["engine"].update(shared_workspace="ws."),
+        r"engine.shared_workspace .* must name a bound token under the 'ws.' root",
+    ),
+    (
+        "ws_token_not_a_string",
+        lambda raw: raw["engine"].update(shared_workspace=3),
+        r"engine.shared_workspace .* must name a bound token under the 'ws.' root",
+    ),
+    (
+        "slot_without_pack",
+        _drop_prep_pack,
+        r"slot 'prep' declares no packs",
+    ),
+    (
+        # `num_warps` is dkdv's field, not dq's.
+        "knob_not_declared_in_slot_kmd",
+        lambda raw: raw["slots"][2].update(knobs=["block_m", "num_warps"]),
+        r"slots\[dq\].knobs names 'num_warps', which no kmd_fields entry declares",
+    ),
+    (
+        "string_knob",
+        lambda raw: raw["slots"][1].update(knobs=["dtype"]),
+        r"slots\[dkdv\].knobs names 'dtype', declared in kmd_fields with type 'string'",
+    ),
+    (
+        "duplicate_knob",
+        lambda raw: raw["slots"][1].update(knobs=["block_m", "block_m"]),
+        r"slots\[dkdv\].knobs lists \['block_m'\] more than once",
+    ),
+    (
+        # num_warps belongs to dkdv's KMD, not dq's.
+        "kernel_metadata_outside_slot_kmd",
+        lambda raw: raw["packs"][2]["kernels"][0]["metadata"].update(num_warps=4),
+        r"slot 'dq': pack 'dq_causal' kernel 'bwd.dq_causal_m64': metadata names 'num_warps'",
+    ),
+    (
+        "specialization_not_a_partition",
+        lambda raw: raw["slots"][1]["specialization"].update(
+            matcher_only_fields=["block_m", "dtype"]
+        ),
+        r"slot 'dkdv': 'specialization' must partition the declared kmd_fields",
+    ),
+    (
+        "missing_discriminator",
+        lambda raw: raw["packs"][3].pop("discriminator"),
+        r"declare no 'discriminator', but slot 'dq' has 2 packs",
+    ),
+    (
+        "lone_pack_discriminator",
+        lambda raw: raw["packs"][1].update(discriminator="x"),
+        r"declares a discriminator, but slot 'dkdv' has only one pack",
+    ),
+    (
+        "duplicate_discriminator",
+        lambda raw: raw["packs"][3].update(discriminator="causal"),
+        r"packs declare duplicate discriminators",
+    ),
+    (
+        "ranker_not_a_boolean",
+        lambda raw: raw["slots"][1].update(ranker="yes"),
+        r"slots\[dkdv\].ranker must be true or false",
+    ),
+    # A YAML list or mapping is unhashable: it must not escape as a TypeError.
+    (
+        "pack_slot_list",
+        lambda raw: raw["packs"][0].update(slot=["prep"]),
+        r"pack 'prep' declares slot .*, which must be a slot name",
+    ),
+    (
+        "pack_slot_mapping",
+        lambda raw: raw["packs"][0].update(slot={"name": "prep"}),
+        r"pack 'prep' declares slot .*, which must be a slot name",
+    ),
+    (
+        "unknown_slot_key",
+        lambda raw: raw["slots"][1].update(knob=["block_m"]),
+        r"slot 'dkdv' declares \['(knob|typo)'\]",
+    ),
+    (
+        "unknown_slot_kmd_field_key",
+        lambda raw: raw["slots"][1]["kmd_fields"][0].update(typo="x"),
+        r"slot 'dkdv' kmd_fields entry 'block_m' declares \['(knob|typo)'\]",
+    ),
+    (
+        "slot_kmd_field_optional",
+        lambda raw: raw["slots"][1]["kmd_fields"][0].update(optional=True),
+        r"kmd_fields\[\]\.optional is not a real key.*Affected entries: block_m",
+    ),
+    (
+        "slot_kmd_field_default",
+        lambda raw: raw["slots"][1]["kmd_fields"][0].update(default=True),
+        r"kmd_fields\[\]\.default is not a real key.*Affected entries: block_m",
+    ),
+]
 
 
 @pytest.mark.parametrize(
-    "name,message",
-    [
-        ("Prep", r"slot name 'Prep' in slots must match \^\[a-z\]\[a-z0-9_\]\*\$"),
-        ("9p", r"slot name '9p' in slots must match"),
-        ("global", r"slot name 'global' in slots is reserved for engine-wide knobs"),
-    ],
+    "mutate,message",
+    [(mutate, message) for _, mutate, message in REFUSALS],
+    ids=[name for name, _, _ in REFUSALS],
 )
-def test_a_slot_name_follows_the_loaders_rule(tmp_path, name, message):
-    def rename(raw):
-        raw["slots"][0]["name"] = name
-        raw["packs"][0]["slot"] = name
-
-    _expect(tmp_path, rename, message)
-
-
-def test_slot_names_are_unique(tmp_path):
-    def duplicate(raw):
-        raw["slots"][2]["name"] = "dkdv"
-
-    _expect(tmp_path, duplicate, r"slot name 'dkdv' is declared more than once")
-
-
-def test_every_pack_names_a_declared_slot(tmp_path):
-    _expect(
-        tmp_path,
-        lambda raw: raw["packs"][0].pop("slot"),
-        r"pack 'prep' declares no 'slot', which every pack of a slotted engine must",
-    )
-    _expect(
-        tmp_path,
-        lambda raw: raw["packs"][0].update(slot="nope"),
-        r"pack 'prep' names slot 'nope', which this config does not declare",
-    )
+def test_a_slotted_config_is_refused(tmp_path, mutate, message):
+    _expect(tmp_path, mutate, message)
 
 
 def test_an_unslotted_config_refuses_a_pack_slot_and_a_shared_workspace(
@@ -377,129 +489,6 @@ def test_an_unslotted_config_refuses_a_pack_slot_and_a_shared_workspace(
     path.write_text(yaml.safe_dump(shared), encoding="utf-8")
     with pytest.raises(ConfigError, match=r"key 'shared_workspace' requires 'slots'"):
         load_config(path)
-
-
-@pytest.mark.parametrize("token", ["bytes", "ws.", 3])
-def test_the_shared_workspace_token_lives_under_the_ws_root(tmp_path, token):
-    _expect(
-        tmp_path,
-        lambda raw: raw["engine"].update(shared_workspace=token),
-        r"engine.shared_workspace .* must name a bound token under the 'ws.' root",
-    )
-
-
-def test_a_slot_with_no_pack_is_refused(tmp_path):
-    def drop_prep_pack(raw):
-        raw["packs"] = [p for p in raw["packs"] if p["slot"] != "prep"]
-
-    _expect(tmp_path, drop_prep_pack, r"slot 'prep' declares no packs")
-
-
-def test_knobs_are_checked_against_their_own_slots_int_fields(tmp_path):
-    # `num_warps` is dkdv's field, not dq's.
-    _expect(
-        tmp_path,
-        lambda raw: raw["slots"][2].update(knobs=["block_m", "num_warps"]),
-        r"slots\[dq\].knobs names 'num_warps', which no kmd_fields entry declares",
-    )
-
-    def string_knob(raw):
-        raw["slots"][1]["knobs"] = ["dtype"]
-
-    _expect(
-        tmp_path,
-        string_knob,
-        r"slots\[dkdv\].knobs names 'dtype', declared in kmd_fields with type 'string'",
-    )
-    _expect(
-        tmp_path,
-        lambda raw: raw["slots"][1].update(knobs=["block_m", "block_m"]),
-        r"slots\[dkdv\].knobs lists \['block_m'\] more than once",
-    )
-
-
-def test_kernel_metadata_is_checked_against_its_slots_kmd(tmp_path):
-    def foreign_field(raw):
-        # num_warps belongs to dkdv's KMD, not dq's.
-        raw["packs"][2]["kernels"][0]["metadata"]["num_warps"] = 4
-
-    _expect(
-        tmp_path,
-        foreign_field,
-        r"slot 'dq': pack 'dq_causal' kernel 'bwd.dq_causal_m64': metadata names 'num_warps'",
-    )
-
-
-def test_each_slot_declares_its_own_specialization(tmp_path):
-    def partial(raw):
-        raw["slots"][1]["specialization"]["matcher_only_fields"] = ["block_m", "dtype"]
-
-    _expect(
-        tmp_path,
-        partial,
-        r"slot 'dkdv': 'specialization' must partition the declared kmd_fields",
-    )
-
-
-def test_a_multi_pack_slot_needs_discriminators_and_a_lone_pack_must_not_have_one(
-    tmp_path,
-):
-    _expect(
-        tmp_path,
-        lambda raw: raw["packs"][3].pop("discriminator"),
-        r"declare no 'discriminator', but slot 'dq' has 2 packs",
-    )
-    _expect(
-        tmp_path,
-        lambda raw: raw["packs"][1].update(discriminator="x"),
-        r"declares a discriminator, but slot 'dkdv' has only one pack",
-    )
-    _expect(
-        tmp_path,
-        lambda raw: raw["packs"][3].update(discriminator="causal"),
-        r"packs declare duplicate discriminators",
-    )
-
-
-def test_a_slot_ranker_flag_is_a_boolean(tmp_path):
-    _expect(
-        tmp_path,
-        lambda raw: raw["slots"][1].update(ranker="yes"),
-        r"slots\[dkdv\].ranker must be true or false",
-    )
-
-
-@pytest.mark.parametrize("slot", [["prep"], {"name": "prep"}])
-def test_a_pack_slot_that_is_not_a_name_is_a_config_error(tmp_path, slot):
-    # A YAML list or mapping is unhashable: it must not escape as a TypeError.
-    _expect(
-        tmp_path,
-        lambda raw: raw["packs"][0].update(slot=slot),
-        r"pack 'prep' declares slot .*, which must be a slot name",
-    )
-
-
-@pytest.mark.parametrize(
-    "mutate,scope",
-    [
-        (lambda raw: raw["slots"][1].update(knob=["block_m"]), r"slot 'dkdv'"),
-        (
-            lambda raw: raw["slots"][1]["kmd_fields"][0].update(typo="x"),
-            r"slot 'dkdv' kmd_fields entry 'block_m'",
-        ),
-    ],
-)
-def test_an_unknown_key_on_a_slot_or_its_kmd_field_is_refused(tmp_path, mutate, scope):
-    _expect(tmp_path, mutate, scope + r" declares \['(knob|typo)'\]")
-
-
-@pytest.mark.parametrize("key", ["optional", "default"])
-def test_a_deprecated_kmd_field_key_on_a_slot_is_refused(tmp_path, key):
-    _expect(
-        tmp_path,
-        lambda raw: raw["slots"][1]["kmd_fields"][0].update({key: True}),
-        rf"kmd_fields\[\]\.{key} is not a real key.*Affected entries: block_m",
-    )
 
 
 # --- sdk_version and behavior_notes reach the slotted UED -------------------------------

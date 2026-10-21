@@ -144,6 +144,31 @@ std::vector<std::filesystem::path> packedSlottedShards()
     return shards;
 }
 
+/// Calls `visit(shard, kernel)` for every kernel of every pack of every descriptor set
+/// that resolves from each shard's loaded catalog. Stops at the first fatal (ASSERT_) failure
+/// inside `visit`, as the test would have aborted.
+template <typename Visit>
+void forEachPackedKernel(const std::vector<std::filesystem::path>& shards, Visit&& visit)
+{
+    for(const auto& shard : shards)
+    {
+        for(const auto& set : resolveDescriptorSets(loadDescriptorCatalog(shard)))
+        {
+            for(const auto& pack : set.packs)
+            {
+                for(const auto& kernel : pack.kernels)
+                {
+                    visit(shard, kernel);
+                    if(::testing::Test::HasFatalFailure())
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The slotted shards, a skip when nothing was packed at all, or a failure when the unit
 /// pack ran and the slotted one did not.
 #define REQUIRE_PACKED_SLOTTED_SHARDS(slottedShards)                                    \
@@ -265,44 +290,39 @@ TEST(TestPackedDescriptorLoad, LibraryResolvesFromTheDescriptorThatDeclaredIt)
 
     size_t kpackKernelsChecked = 0;
 
-    for(const auto& shard : shards)
-    {
-        for(const auto& set : resolveDescriptorSets(loadDescriptorCatalog(shard)))
+    forEachPackedKernel(shards, [&kpackKernelsChecked](const auto& /*shard*/, const auto& kernel) {
+        if(kernel.source.kind != KernelSourceKind::KPACK)
         {
-            for(const auto& pack : set.packs)
-            {
-                for(const auto& kernel : pack.kernels)
-                {
-                    if(kernel.source.kind != KernelSourceKind::KPACK)
-                    {
-                        continue;
-                    }
-
-                    ASSERT_FALSE(kernel.originDirectory.empty())
-                        << "kernel '" << kernel.name
-                        << "' came from a file but carries no originDirectory, so nothing can "
-                           "anchor its library.";
-                    ASSERT_FALSE(kernel.source.library.empty())
-                        << "packed kernel '" << kernel.name << "' names no archive.";
-
-                    std::error_code ec;
-                    const auto resolved = std::filesystem::weakly_canonical(
-                        kernel.originDirectory / kernel.source.library, ec);
-
-                    EXPECT_TRUE(std::filesystem::exists(resolved))
-                        << "kernel '" << kernel.name << "' names an archive that is not there.\n"
-                        << "  originDirectory : " << kernel.originDirectory << "\n"
-                        << "  library         : " << kernel.source.library << "\n"
-                        << "  resolves to     : " << resolved << "\n"
-                        << "This is the runtime's own join (IngestorKernelCode.hpp, KPACK "
-                           "branch). A library written relative to the arch root instead of to "
-                           "this descriptor's own directory fails exactly here, and only for "
-                           "nested descriptors.";
-
-                    ++kpackKernelsChecked;
-                }
-            }
+            return;
         }
+
+        ASSERT_FALSE(kernel.originDirectory.empty())
+            << "kernel '" << kernel.name
+            << "' came from a file but carries no originDirectory, so nothing can "
+               "anchor its library.";
+        ASSERT_FALSE(kernel.source.library.empty())
+            << "packed kernel '" << kernel.name << "' names no archive.";
+
+        std::error_code ec;
+        const auto resolved
+            = std::filesystem::weakly_canonical(kernel.originDirectory / kernel.source.library, ec);
+
+        EXPECT_TRUE(std::filesystem::exists(resolved))
+            << "kernel '" << kernel.name << "' names an archive that is not there.\n"
+            << "  originDirectory : " << kernel.originDirectory << "\n"
+            << "  library         : " << kernel.source.library << "\n"
+            << "  resolves to     : " << resolved << "\n"
+            << "This is the runtime's own join (IngestorKernelCode.hpp, KPACK "
+               "branch). A library written relative to the arch root instead of to "
+               "this descriptor's own directory fails exactly here, and only for "
+               "nested descriptors.";
+
+        ++kpackKernelsChecked;
+    });
+
+    if(HasFatalFailure())
+    {
+        return;
     }
 
     // Without this the test passes vacuously on a tree that packed no kpack kernel at all
@@ -340,52 +360,43 @@ TEST(TestPackedDescriptorLoad, PackedKernelsSatisfyTheRuntimeContainmentGuard)
 
     size_t nestedChecked = 0;
 
-    for(const auto& shard : shards)
-    {
-        for(const auto& set : resolveDescriptorSets(loadDescriptorCatalog(shard)))
+    forEachPackedKernel(shards, [&nestedChecked](const auto& /*shard*/, const auto& kernel) {
+        if(kernel.source.kind != KernelSourceKind::KPACK)
         {
-            for(const auto& pack : set.packs)
-            {
-                for(const auto& kernel : pack.kernels)
-                {
-                    if(kernel.source.kind != KernelSourceKind::KPACK)
-                    {
-                        continue;
-                    }
-
-                    ASSERT_FALSE(kernel.treeRoot.empty())
-                        << "kernel '" << kernel.name
-                        << "' carries no treeRoot, so the guard has nothing to anchor "
-                           "containment on and would fall back to its own directory.";
-
-                    std::error_code ec;
-                    const auto origin
-                        = std::filesystem::weakly_canonical(kernel.originDirectory, ec);
-                    const auto boundary = std::filesystem::weakly_canonical(kernel.treeRoot, ec);
-                    const auto resolved
-                        = std::filesystem::weakly_canonical(origin / kernel.source.library, ec);
-
-                    // IngestorKernelCode.hpp, KPACK branch, verbatim.
-                    const std::string relative
-                        = resolved.lexically_relative(boundary).generic_string();
-                    const bool escapes = resolved != boundary
-                                         && (relative.empty() || relative.rfind("..", 0) == 0);
-
-                    EXPECT_FALSE(escapes)
-                        << "kernel '" << kernel.name
-                        << "' would be REFUSED by the runtime containment guard.\n"
-                        << "  originDirectory : " << origin << "\n"
-                        << "  treeRoot        : " << boundary << "\n"
-                        << "  library         : " << kernel.source.library << "\n"
-                        << "  resolves to     : " << resolved;
-
-                    if(origin != boundary)
-                    {
-                        ++nestedChecked;
-                    }
-                }
-            }
+            return;
         }
+
+        ASSERT_FALSE(kernel.treeRoot.empty())
+            << "kernel '" << kernel.name
+            << "' carries no treeRoot, so the guard has nothing to anchor "
+               "containment on and would fall back to its own directory.";
+
+        std::error_code ec;
+        const auto origin = std::filesystem::weakly_canonical(kernel.originDirectory, ec);
+        const auto boundary = std::filesystem::weakly_canonical(kernel.treeRoot, ec);
+        const auto resolved = std::filesystem::weakly_canonical(origin / kernel.source.library, ec);
+
+        // IngestorKernelCode.hpp, KPACK branch, verbatim.
+        const std::string relative = resolved.lexically_relative(boundary).generic_string();
+        const bool escapes
+            = resolved != boundary && (relative.empty() || relative.rfind("..", 0) == 0);
+
+        EXPECT_FALSE(escapes) << "kernel '" << kernel.name
+                              << "' would be REFUSED by the runtime containment guard.\n"
+                              << "  originDirectory : " << origin << "\n"
+                              << "  treeRoot        : " << boundary << "\n"
+                              << "  library         : " << kernel.source.library << "\n"
+                              << "  resolves to     : " << resolved;
+
+        if(origin != boundary)
+        {
+            ++nestedChecked;
+        }
+    });
+
+    if(HasFatalFailure())
+    {
+        return;
     }
 
     EXPECT_GT(nestedChecked, 0U)
@@ -405,37 +416,27 @@ TEST(TestPackedDescriptorLoad, PackedKernelsCarryCompleteKpackCoordinates)
 {
     REQUIRE_PACKED_SHARDS(shards);
 
-    for(const auto& shard : shards)
-    {
-        for(const auto& set : resolveDescriptorSets(loadDescriptorCatalog(shard)))
+    forEachPackedKernel(shards, [](const auto& /*shard*/, const auto& kernel) {
+        if(kernel.source.kind != KernelSourceKind::KPACK)
         {
-            for(const auto& pack : set.packs)
-            {
-                for(const auto& kernel : pack.kernels)
-                {
-                    if(kernel.source.kind != KernelSourceKind::KPACK)
-                    {
-                        continue;
-                    }
-
-                    EXPECT_FALSE(kernel.source.tocKey.empty())
-                        << "packed kernel '" << kernel.name
-                        << "' has an empty toc_key; the archive cannot be indexed.";
-                    EXPECT_FALSE(kernel.source.symbol.empty())
-                        << "packed kernel '" << kernel.name
-                        << "' has an empty symbol; no entry point can be resolved.";
-                    EXPECT_FALSE(kernel.source.sha256.empty())
-                        << "packed kernel '" << kernel.name << "' has an empty sha256.";
-                    // Every kernel this tree packs takes arguments, so an empty list here is
-                    // the extractor having found nothing rather than a nullary kernel -- the
-                    // failure that would otherwise read as a signature agreeing with anything.
-                    EXPECT_FALSE(kernel.source.signature.empty())
-                        << "packed kernel '" << kernel.name
-                        << "' has an empty signature; nothing would be compared at dispatch.";
-                }
-            }
+            return;
         }
-    }
+
+        EXPECT_FALSE(kernel.source.tocKey.empty())
+            << "packed kernel '" << kernel.name
+            << "' has an empty toc_key; the archive cannot be indexed.";
+        EXPECT_FALSE(kernel.source.symbol.empty())
+            << "packed kernel '" << kernel.name
+            << "' has an empty symbol; no entry point can be resolved.";
+        EXPECT_FALSE(kernel.source.sha256.empty())
+            << "packed kernel '" << kernel.name << "' has an empty sha256.";
+        // Every kernel this tree packs takes arguments, so an empty list here is
+        // the extractor having found nothing rather than a nullary kernel -- the
+        // failure that would otherwise read as a signature agreeing with anything.
+        EXPECT_FALSE(kernel.source.signature.empty())
+            << "packed kernel '" << kernel.name
+            << "' has an empty signature; nothing would be compared at dispatch.";
+    });
 }
 
 /// Nothing in this root reaches the staged tree still claiming a producer-side source kind.
@@ -456,22 +457,12 @@ TEST(TestPackedDescriptorLoad, PackedKernelsWereRewrittenToKpackForm)
 {
     REQUIRE_PACKED_SHARDS(shards);
 
-    for(const auto& shard : shards)
-    {
-        for(const auto& set : resolveDescriptorSets(loadDescriptorCatalog(shard)))
-        {
-            for(const auto& pack : set.packs)
-            {
-                for(const auto& kernel : pack.kernels)
-                {
-                    EXPECT_EQ(kernel.source.kind, KernelSourceKind::KPACK)
-                        << "kernel '" << kernel.name << "' in " << shard
-                        << " reached the staged tree without being rewritten to kpack form; it "
-                           "still names a producer-side source the tree does not carry.";
-                }
-            }
-        }
-    }
+    forEachPackedKernel(shards, [](const auto& shard, const auto& kernel) {
+        EXPECT_EQ(kernel.source.kind, KernelSourceKind::KPACK)
+            << "kernel '" << kernel.name << "' in " << shard
+            << " reached the staged tree without being rewritten to kpack form; it "
+               "still names a producer-side source the tree does not carry.";
+    });
 }
 
 // ---------------------------------------------------------------------------

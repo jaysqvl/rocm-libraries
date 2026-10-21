@@ -349,10 +349,6 @@ void registerStubs(const HarvestedSymbols& harvested)
     }
 }
 
-/// The root of the shared-workspace tokens a slotted engine's graph match publishes
-/// (RFC 0021 §6).
-constexpr std::string_view WORKSPACE_TOKEN_ROOT = "ws.";
-
 /// Binds one recorded sample's flattened scalars into a feature-extraction context.
 /// @param reserveWorkspace Leave `ws.*` bindings out, as a slotted engine's ranker features do
 ///        (RFC 0021 §6).
@@ -366,7 +362,7 @@ void bindSample(hipdnn_plugin_sdk::uhd::FeatureExtractionContext& context,
     }
     for(const auto& [name, value] : bindings.items())
     {
-        if(reserveWorkspace && name.rfind(WORKSPACE_TOKEN_ROOT, 0) == 0)
+        if(reserveWorkspace && detail::isWorkspaceToken(name))
         {
             continue;
         }
@@ -555,14 +551,20 @@ struct SelectionScope
 /// reference could never be bound at runtime.
 void requireNoWorkspaceReference(const hipdnn_plugin_sdk::uhd::FeatureExtractor& extractor)
 {
+    // The lexicographically first token, as the loader names it, so the report does not depend
+    // on the extractor's hash order.
+    const std::string* first = nullptr;
     for(const auto& reference : extractor.getVariableRefs())
     {
-        if(reference.size() > 1 && reference.front() == '$'
-           && reference.rfind(WORKSPACE_TOKEN_ROOT, 1) == 1)
+        if(detail::isWorkspaceToken(reference) && (first == nullptr || reference < *first))
         {
-            throw std::invalid_argument("Feature reads '" + reference
-                                        + "', a shared-workspace token a slotted engine reserves");
+            first = &reference;
         }
+    }
+    if(first != nullptr)
+    {
+        throw std::invalid_argument("Feature reads '" + *first
+                                    + "', a shared-workspace token a slotted engine reserves");
     }
 }
 

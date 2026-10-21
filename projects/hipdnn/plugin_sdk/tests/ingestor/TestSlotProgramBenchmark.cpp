@@ -539,6 +539,22 @@ TEST(TestSlotProgramBenchmark, AWorkspaceLimitTimesThePrunedCatalogsAndWritesNoR
     EXPECT_FALSE(bench.programRecord().has_value());
 }
 
+TEST(TestSlotProgramBenchmark, ANarrowedPlanWhoseSlotsAreAllCoveredIsServedWithoutTiming)
+{
+    Bench bench;
+    bench.seedSlotRecord(0, {0x12, 0x11});
+    bench.seedSlotRecord(1, {0x23, 0x21, 0x22});
+    bench.seedSlotRecord(2, {0x31, 0x32});
+    ASSERT_FALSE(bench.programRecord().has_value());
+
+    // No program record exists, so only the narrowing keeps the benchmark from running.
+    const auto served = bench.benchmarkAndServe({{"dkdv.block_m", 64}});
+
+    EXPECT_EQ(bench.clock().sampleCount(), 0U);
+    EXPECT_EQ(served, (Program{0x12, 0x21, 0x31}));
+    EXPECT_FALSE(bench.programRecord().has_value());
+}
+
 TEST(TestSlotProgramBenchmark, ACandidateWhoseBuildRejectsTheProblemEndsTheBenchmarkPlanBuild)
 {
     Bench bench;
@@ -714,6 +730,22 @@ TEST_F(TestSlotProgramBenchmarkStallRestart,
     // No later program of the stalled pass is attempted, and the restart never arms.
     EXPECT_EQ(gStreamWaitFaults.rejectedArms, 1);
     EXPECT_EQ(gStreamWaitFaults.armCalls, SAMPLES_PER_RUN + 1);
+    expectCompleteComparison(bench, served);
+}
+
+TEST_F(TestSlotProgramBenchmarkStallRestart,
+       AnUnstallableWinnersProgramRestartsTheComparisonUnstalled)
+{
+    // The reference and the four one-slot variations are timed stalled; the winners program's
+    // first sample cannot arm.
+    gStreamWaitFaults.failFromArm = 5 * SAMPLES_PER_RUN + 1;
+    Bench bench(/*defaultTimer=*/true);
+
+    const auto served = bench.benchmarkAndServe();
+
+    // The stalled pass stops at that arm and the unstalled restart never arms again.
+    EXPECT_EQ(gStreamWaitFaults.rejectedArms, 1);
+    EXPECT_EQ(gStreamWaitFaults.armCalls, 5 * SAMPLES_PER_RUN + 1);
     expectCompleteComparison(bench, served);
 }
 #endif

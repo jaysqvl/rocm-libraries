@@ -121,25 +121,16 @@ KernelDescriptorPack slotPack(uint8_t packSeed,
                               const std::vector<KernelSpec>& kernels,
                               const std::vector<std::string>& arch = {})
 {
-    KernelDescriptorPack pack;
-    pack.id = testId(packSeed);
-    pack.name = slot + " pack";
-    pack.engineId = ENGINE_ID;
-    pack.dispatchId = DISPATCH_ID;
-    pack.arch = arch;
-    pack.slot = slot;
+    std::vector<KernelDescriptor> descriptors;
+    descriptors.reserve(kernels.size());
     for(const auto& spec : kernels)
     {
-        KernelDescriptor kernel;
-        kernel.id = testId(spec.seed);
-        kernel.name = spec.name;
-        kernel.source.sourceFile = "Test.cpp";
-        kernel.source.entryPoint = spec.name;
-        kernel.metadata
-            = {{BLOCK_M, MetadataValue{spec.blockM}}, {BLOCK_N, MetadataValue{spec.blockN}}};
-        pack.kernels.push_back(std::move(kernel));
+        descriptors.push_back(makeSlotKernel(
+            spec.seed,
+            spec.name,
+            {{BLOCK_M, MetadataValue{spec.blockM}}, {BLOCK_N, MetadataValue{spec.blockN}}}));
     }
-    return pack;
+    return makeSlotPack(packSeed, slot, std::move(descriptors), arch);
 }
 
 std::vector<KernelDescriptorPack> prepPacks()
@@ -226,15 +217,6 @@ TEST(TestSlottedStateManager, EachSlotHoldsItsOwnCatalogInKernelIdOrder)
     EXPECT_TRUE(verdict.applicable) << verdict.declineReason;
     EXPECT_TRUE(manager->isApplicable(context));
     EXPECT_EQ(verdict.sharedWorkspaceBytes, 1000U);
-}
-
-TEST(TestSlottedStateManager, AnOutOfRangeSlotIsRejected)
-{
-    const ScopedSlottedMatch symbols;
-    const auto manager = makeManager();
-    const TestGraph graph(makeGraphId(1));
-    const auto properties = testDeviceProperties();
-    const MatchContext context{graph, 0, properties};
 
     EXPECT_THROW(manager->unsortedCatalog(3, context), std::out_of_range);
     EXPECT_THROW(manager->slotName(3), std::out_of_range);
@@ -243,7 +225,7 @@ TEST(TestSlottedStateManager, AnOutOfRangeSlotIsRejected)
 TEST(TestSlottedStateManager, OneGraphMatchServesEveryAccessorOfACatalogBuild)
 {
     const ScopedSlottedMatch symbols;
-    const auto manager = makeManager();
+    const auto manager = makeManager(defaultSlots(), WS_BYTES, 4);
     const auto properties = testDeviceProperties();
 
     const TestGraph graph(makeGraphId(1));
@@ -271,6 +253,8 @@ TEST(TestSlottedStateManager, OneGraphMatchServesEveryAccessorOfACatalogBuild)
     (void)manager->unsortedCatalog(0, otherContext);
     (void)manager->unsortedCatalog(1, otherContext);
     EXPECT_EQ(graphMatchState().calls, 2);
+    (void)manager->unsortedCatalog(1, context);
+    EXPECT_EQ(graphMatchState().calls, 3) << "the evicted entry rebuilds, once";
 }
 
 TEST(TestSlottedStateManager, AGraphWithNoIdentityStillMatchesOncePerBuildNotOncePerSlot)
@@ -284,26 +268,6 @@ TEST(TestSlottedStateManager, AGraphWithNoIdentityStillMatchesOncePerBuildNotOnc
     EXPECT_TRUE(manager->slotProgramVerdict(context).applicable);
 
     EXPECT_EQ(graphMatchState().calls, 1);
-}
-
-TEST(TestSlottedStateManager, AnEvictedSlotCatalogRebuildsFromOneMatch)
-{
-    const ScopedSlottedMatch symbols;
-    // Room for one graph's three slot catalogs, not a second graph's.
-    const auto manager = makeManager(defaultSlots(), WS_BYTES, 4);
-    const auto properties = testDeviceProperties();
-    const TestGraph first(makeGraphId(1));
-    const TestGraph second(makeGraphId(2));
-    const MatchContext firstContext{first, 0, properties};
-    const MatchContext secondContext{second, 0, properties};
-
-    (void)manager->unsortedCatalog(0, firstContext);
-    (void)manager->unsortedCatalog(0, secondContext);
-    ASSERT_EQ(graphMatchState().calls, 2);
-
-    EXPECT_EQ(namesOf(manager->unsortedCatalog(1, firstContext)),
-              (Names{"dkdv_a", "dkdv_b", "dkdv_c"}));
-    EXPECT_EQ(graphMatchState().calls, 3) << "the evicted entry rebuilds, once";
 }
 
 TEST(TestSlottedStateManager, AnEqualTupleInTwoSlotsIsAcceptedInBoth)
@@ -372,22 +336,12 @@ TEST(TestSlottedStateManager, ADuplicateKernelIdInOneSlotDropsThatPack)
               (Names{"dkdv_a", "dkdv_b", "dkdv_c"}));
 }
 
-TEST(TestSlottedStateManager, AnUnslottedEngineIsOneImplicitSlotAndKeepsItsThrow)
+TEST(TestSlottedStateManager, AnUnslottedEngineIsOneImplicitSlot)
 {
     const ScopedSlottedMatch symbols;
     const TestGraph graph(makeGraphId(1));
     const auto properties = testDeviceProperties();
     const MatchContext context{graph, 0, properties};
-
-    // Same two kernels, same tuple: an unslotted engine still refuses to construct.
-    auto repeated = slotPack(0x24, "", {{0x25, "one", 64, 64}, {0x26, "two", 64, 64}});
-    EXPECT_THROW(Manager(slotSchema(0xA2, "kmd"),
-                         {},
-                         makeStubDispatches(),
-                         {repeated},
-                         std::make_shared<UnrankedKernelHeuristic>(),
-                         GRAPH_MATCH),
-                 std::invalid_argument);
 
     const Manager manager(slotSchema(0xA2, "kmd"),
                           {},
@@ -595,6 +549,13 @@ TEST(TestSlottedStateManager, ABadSharedWorkspaceDeclinesWithAMessageNamingTheTo
         {"NonIntegerOffsetToken",
          with("ws.lse.offset", MetadataValue{std::string{"x"}}),
          "offset token 'ws.lse.offset' is not a non-negative integer"},
+        {"TheFirstBadOffsetTokenByNameIsReported",
+         [&] {
+             auto tokens = with("ws.b.offset", MetadataValue{std::string{"x"}});
+             tokens["ws.a.offset"] = MetadataValue{int64_t{-1}};
+             return tokens;
+         }(),
+         "offset token 'ws.a.offset' is not a non-negative integer"},
     };
     for(const auto& testCase : cases)
     {
@@ -618,20 +579,6 @@ TEST(TestSlottedStateManager, ABadSharedWorkspaceDeclinesWithAMessageNamingTheTo
         }
         EXPECT_EQ(graphMatchState().calls, 1);
     }
-}
-
-TEST(TestSlottedStateManager, TheFirstOfSeveralBadOffsetTokensByNameIsReported)
-{
-    const ScopedSlottedMatch symbols;
-    graphMatchState().tokens["ws.b.offset"] = MetadataValue{std::string{"x"}};
-    graphMatchState().tokens["ws.a.offset"] = MetadataValue{int64_t{-1}};
-    const auto manager = makeManager();
-    const TestGraph graph(makeGraphId(1));
-    const auto properties = testDeviceProperties();
-    const MatchContext context{graph, 0, properties};
-
-    EXPECT_EQ(manager->slotProgramVerdict(context).declineReason,
-              "offset token 'ws.a.offset' is not a non-negative integer");
 }
 
 TEST(TestSlottedStateManager, ASharedRegionIsValidatedAgainstItsAlignedSize)
@@ -830,6 +777,37 @@ TEST(TestSlottedStateManager, ASlotRankerNeverSeesWorkspaceTokensButAnUnslottedO
     (void)unslotted->sortedCatalog(context);
     ASSERT_EQ(capturedRows().size(), 3U) << "an unslotted engine's ranker must still bind ws.*";
     EXPECT_DOUBLE_EQ(capturedRows().front().front(), 1000.0);
+}
+
+constexpr const char* DKDV_SCORE = "hipdnn.kernel_ingestor.test.slotted.dkdv_score";
+
+/// Larger tiles first: the opposite of the kernel-id order every slot's kernels are declared in.
+double scoreByTileExtent(const MatchContext& /*context*/,
+                         const BoundTokens& /*bound*/,
+                         const KernelDefinition& kernel)
+{
+    return static_cast<double>(1000 * kernel.getIntMetadata(BLOCK_M)
+                               + kernel.getIntMetadata(BLOCK_N));
+}
+
+TEST(TestSlottedStateManager, ASlotsRankerOrdersOnlyThatSlot)
+{
+    const ScopedSlottedMatch symbols;
+    ScoreRegistry::registerSymbol(DKDV_SCORE, &scoreByTileExtent);
+    const hipdnn_data_sdk::utilities::ScopedResource<const char*> scorer{
+        DKDV_SCORE, [](const char* symbol) { ScoreRegistry::unregisterSymbol(symbol); }};
+    auto slots = defaultSlots();
+    slots[1].heuristic = std::make_shared<NativeKernelHeuristic>(DKDV_SCORE);
+    const auto manager = makeManager(std::move(slots));
+    const TestGraph graph(makeGraphId(1));
+    const auto properties = testDeviceProperties();
+    const MatchContext context{graph, 0, properties};
+
+    EXPECT_EQ(namesOf(manager->sortedCatalog(1, context)), (Names{"dkdv_c", "dkdv_b", "dkdv_a"}));
+    EXPECT_EQ(namesOf(manager->sortedCatalog(0, context)), (Names{"prep_small", "prep_large"}))
+        << "prep keeps its own, unranked order";
+    EXPECT_EQ(namesOf(manager->sortedCatalog(2, context)), (Names{"dq_a", "dq_b"}))
+        << "dq keeps its own, unranked order";
 }
 
 // ----- identity ----------------------------------------------------------------------------

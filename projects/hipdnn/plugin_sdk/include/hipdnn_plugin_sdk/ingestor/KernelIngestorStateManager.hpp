@@ -473,18 +473,7 @@ public:
     Catalog measuredCatalog(const MatchContext& context) const
     {
         requireUnslotted("measuredCatalog");
-        Catalog catalog = catalogFor(_slots.front(), 0, context);
-        // A heuristic order is provisional (a sweep can postdate it), so look up a record
-        // even when already sorted. An unresolved device's empty catalog is never covered.
-        if(catalog.measuredRecord == nullptr && adoptCoveringRecord(catalog, context))
-        {
-            if(const auto key = cacheKey(context); key.has_value())
-            {
-                // put, not putIfAbsent: a measured order replaces a provisional one.
-                _catalogCache.put(*key, catalog);
-            }
-        }
-        return catalog;
+        return measuredCatalogOf(0, context);
     }
 
     /// Records @p record under @p key. Whether an existing on-disk ranking for @p key is
@@ -1426,14 +1415,19 @@ private:
         return catalog;
     }
 
-    /// Slot @p slotIndex's catalog with its slot record adopted when one covers it. A
-    /// benchmarked record outranks the slot's ranker, and may postdate a cached ranker order,
-    /// so it is looked up even when the cached catalog is already sorted.
-    Catalog measuredSlotCatalog(size_t slotIndex, const MatchContext& context) const
+    /// Slot @p slotIndex's catalog with its record adopted when one covers it: the slot's own
+    /// record for a slotted engine, the whole-graph record for an unslotted one. A benchmarked
+    /// record outranks the slot's ranker, and may postdate a cached ranker order (a heuristic
+    /// order is provisional, since a sweep can postdate it), so it is looked up even when the
+    /// cached catalog is already sorted. An unresolved device's empty catalog is never covered.
+    Catalog measuredCatalogOf(size_t slotIndex, const MatchContext& context) const
     {
         const auto& slot = _slots[slotIndex];
         Catalog catalog = catalogFor(slot, slotIndex, context);
-        noteSlotCatalog(slot, context, catalog);
+        if(_slotted)
+        {
+            noteSlotCatalog(slot, context, catalog);
+        }
         if(catalog.measuredRecord == nullptr && adoptCoveringRecord(catalog, context, slot.name))
         {
             if(const auto key = cacheKey(context, slot.name); key.has_value())
@@ -1458,8 +1452,7 @@ private:
         }
 
         // A benchmarked record (whole-graph, or the slot's own) outranks the ranker.
-        Catalog catalog
-            = _slotted ? measuredSlotCatalog(slotIndex, context) : measuredCatalog(context);
+        Catalog catalog = measuredCatalogOf(slotIndex, context);
         if(catalog.isSorted)
         {
             return catalog;
@@ -1981,6 +1974,57 @@ private:
         _programCache.mergeAbsent(std::move(newestFirstPrograms));
     }
 
+    /// A winner-cache shard held under its exclusive lock, with every line it held.
+    template <typename TLine>
+    struct LockedShard
+    {
+        hipdnn_data_sdk::utilities::LineStoreShard shard;
+        std::vector<TLine> lines;
+    };
+
+    /// Opens, locks and reads the on-disk shard of @p gcnArchName, decoding each line with
+    /// @p decode. Empty when the engine has no disk cache or any step fails, after logging the
+    /// failure once; the caller then keeps its in-memory result. On success the lock is held:
+    /// the caller releases it with `unlockLineStore(shard)` once it has appended.
+    template <typename TDecode,
+              typename TLine = typename std::invoke_result_t<TDecode, std::string_view>::value_type>
+    std::optional<LockedShard<TLine>> lockShard(const std::string& gcnArchName,
+                                                TDecode decode) const
+    {
+        if(_engine.name.empty() || !_engine.contentIdentified)
+        {
+            return std::nullopt;
+        }
+
+        auto [shard, openStatus] = openWinnerCacheShard(_engine, gcnArchName);
+        if(openStatus == hipdnn_data_sdk::utilities::LineStoreStatus::VERSION_MISMATCH)
+        {
+            logShardFailureOnce(WinnerShardFailureKind::VERSION_MISMATCH, gcnArchName);
+            return std::nullopt;
+        }
+        if(openStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK || !shard.has_value())
+        {
+            logShardFailureOnce(WinnerShardFailureKind::OPEN, gcnArchName);
+            return std::nullopt;
+        }
+
+        if(hipdnn_data_sdk::utilities::lockLineStore(*shard)
+           != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
+        {
+            logShardFailureOnce(WinnerShardFailureKind::LOCK, gcnArchName);
+            return std::nullopt;
+        }
+
+        auto [lines, readStatus] = hipdnn_data_sdk::utilities::readAllLines(*shard, decode);
+        if(readStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
+        {
+            hipdnn_data_sdk::utilities::unlockLineStore(*shard);
+            logShardFailureOnce(WinnerShardFailureKind::READ, gcnArchName);
+            return std::nullopt;
+        }
+        return LockedShard<TLine>{std::move(*shard), std::move(lines)};
+    }
+
     /// Write-back: re-reads @p key's shard under its LineStore lock, then applies
     /// @p cause's rule, as one critical section under the shard's own lock (mirrors
     /// `LineStoreLockHelper.cpp`). A fresh miss adopts any existing on-disk record for
@@ -2003,37 +2047,10 @@ private:
     WinnerRecord
         writeBackToShard(const WinnerKey& key, WinnerRecord record, WinnerWriteCause cause) const
     {
-        if(_engine.name.empty() || !_engine.contentIdentified)
-        {
-            return record;
-        }
-
         const auto& gcnArchName = key.device.properties().gcnArchName;
-        auto [shard, openStatus] = openWinnerCacheShard(_engine, gcnArchName);
-        if(openStatus == hipdnn_data_sdk::utilities::LineStoreStatus::VERSION_MISMATCH)
+        auto locked = lockShard(gcnArchName, &decodeWinnerRecordLine);
+        if(!locked.has_value())
         {
-            logShardFailureOnce(WinnerShardFailureKind::VERSION_MISMATCH, gcnArchName);
-            return record;
-        }
-        if(openStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK || !shard.has_value())
-        {
-            logShardFailureOnce(WinnerShardFailureKind::OPEN, gcnArchName);
-            return record;
-        }
-
-        if(hipdnn_data_sdk::utilities::lockLineStore(*shard)
-           != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
-        {
-            logShardFailureOnce(WinnerShardFailureKind::LOCK, gcnArchName);
-            return record;
-        }
-
-        const auto [existing, readStatus]
-            = hipdnn_data_sdk::utilities::readAllLines(*shard, &decodeWinnerRecordLine);
-        if(readStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
-        {
-            hipdnn_data_sdk::utilities::unlockLineStore(*shard);
-            logShardFailureOnce(WinnerShardFailureKind::READ, gcnArchName);
             return record;
         }
 
@@ -2041,7 +2058,7 @@ private:
         // line for this key, not the first. Once a shard can hold a superseded line, the
         // first match is stale and comparing against it would wrongly adopt it.
         const WinnerRecord* onDiskWinner = nullptr;
-        for(const auto& [existingKey, existingRecord] : existing)
+        for(const auto& [existingKey, existingRecord] : locked->lines)
         {
             if(existingKey == key)
             {
@@ -2055,13 +2072,13 @@ private:
             // candidates and rank them the same way up to noise, so comparing rankings let both
             // append and the shard kept two lines for one graph. A re-benchmark forced by a record
             // that no longer covers the candidate set is the only writer that supersedes.
-            hipdnn_data_sdk::utilities::unlockLineStore(*shard);
+            hipdnn_data_sdk::utilities::unlockLineStore(locked->shard);
             return *onDiskWinner;
         }
 
-        const auto appendStatus
-            = hipdnn_data_sdk::utilities::appendLine(*shard, encodeWinnerRecordLine(key, record));
-        hipdnn_data_sdk::utilities::unlockLineStore(*shard);
+        const auto appendStatus = hipdnn_data_sdk::utilities::appendLine(
+            locked->shard, encodeWinnerRecordLine(key, record));
+        hipdnn_data_sdk::utilities::unlockLineStore(locked->shard);
         if(appendStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
         {
             logShardFailureOnce(WinnerShardFailureKind::APPEND, gcnArchName);
@@ -2201,56 +2218,26 @@ private:
                             WinnerWriteCause slotCause,
                             WinnerWriteCause programCause) const
     {
-        if(_engine.name.empty() || !_engine.contentIdentified)
-        {
-            return planSlottedWrite(
-                baseKey, slotRecords, program, slotCause, programCause, nullptr);
-        }
-
         const auto& gcnArchName = baseKey.device.properties().gcnArchName;
-        auto [shard, openStatus] = openWinnerCacheShard(_engine, gcnArchName);
-        if(openStatus == hipdnn_data_sdk::utilities::LineStoreStatus::VERSION_MISMATCH)
+        auto locked = lockShard(gcnArchName, &decodeWinnerLine);
+        if(!locked.has_value())
         {
-            logShardFailureOnce(WinnerShardFailureKind::VERSION_MISMATCH, gcnArchName);
-            return planSlottedWrite(
-                baseKey, slotRecords, program, slotCause, programCause, nullptr);
-        }
-        if(openStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK || !shard.has_value())
-        {
-            logShardFailureOnce(WinnerShardFailureKind::OPEN, gcnArchName);
-            return planSlottedWrite(
-                baseKey, slotRecords, program, slotCause, programCause, nullptr);
-        }
-        if(hipdnn_data_sdk::utilities::lockLineStore(*shard)
-           != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
-        {
-            logShardFailureOnce(WinnerShardFailureKind::LOCK, gcnArchName);
             return planSlottedWrite(
                 baseKey, slotRecords, program, slotCause, programCause, nullptr);
         }
 
-        const auto [existing, readStatus]
-            = hipdnn_data_sdk::utilities::readAllLines(*shard, &decodeWinnerLine);
-        if(readStatus != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
-        {
-            hipdnn_data_sdk::utilities::unlockLineStore(*shard);
-            logShardFailureOnce(WinnerShardFailureKind::READ, gcnArchName);
-            return planSlottedWrite(
-                baseKey, slotRecords, program, slotCause, programCause, nullptr);
-        }
-
-        auto plan
-            = planSlottedWrite(baseKey, slotRecords, program, slotCause, programCause, &existing);
+        auto plan = planSlottedWrite(
+            baseKey, slotRecords, program, slotCause, programCause, &locked->lines);
         for(const auto& line : plan.lines)
         {
-            if(hipdnn_data_sdk::utilities::appendLine(*shard, line)
+            if(hipdnn_data_sdk::utilities::appendLine(locked->shard, line)
                != hipdnn_data_sdk::utilities::LineStoreStatus::OK)
             {
                 logShardFailureOnce(WinnerShardFailureKind::APPEND, gcnArchName);
                 break;
             }
         }
-        hipdnn_data_sdk::utilities::unlockLineStore(*shard);
+        hipdnn_data_sdk::utilities::unlockLineStore(locked->shard);
         return plan;
     }
 
