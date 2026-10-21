@@ -517,7 +517,7 @@ namespace TensileLite
         int LocalSplitU = 1;
         bool DirectToLdsA = false;
         bool DirectToLdsB = false;
-        bool OneLDSBuffer                  = false;
+        bool OneLDSBuffer = false;
         int  UnrollMajorLDSA = -1;
         int  UnrollMajorLDSB = -1;
         bool enableLDSTrA    = false;
