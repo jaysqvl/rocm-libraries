@@ -51,7 +51,8 @@ namespace
     X(neg_inf)                       \
     X(nan)                           \
     X(norm_dist_one_special)         \
-    X(uniform_low_precision)
+    X(uniform_low_precision)         \
+    X(maf2_0)
 
     // Keep in sync with string_to_hipblaslt_activation_type().
 #define HIPBLASLT_TEST_ACTIVATIONS(X) \

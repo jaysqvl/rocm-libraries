@@ -211,6 +211,8 @@ namespace TensileLite
                 return "TrigIndAbsCos";
             case InitMode::UniformLowPrecision:
                 return "UniformLowPrecision";
+            case InitMode::Maf2_0:
+                return "Maf2_0";
 
             case InitMode::Count:
                 break;
@@ -284,6 +286,8 @@ namespace TensileLite
                 mode = InitMode::TrigIndAbsCos;
             else if(strValue == ToString(InitMode::UniformLowPrecision))
                 mode = InitMode::UniformLowPrecision;
+            else if(strValue == ToString(InitMode::Maf2_0))
+                mode = InitMode::Maf2_0;
             else if(std::all_of(strValue.begin(), strValue.end(), isdigit))
             {
                 int value = atoi(strValue.c_str());
@@ -1427,7 +1431,11 @@ namespace TensileLite
                     if(!m_problemDependentData)
                     {
 
-                        initArray(p.first, it.init, pUnit.cpuInput.valid.get(), pUnit.maxElements);
+                        initArray(p.first,
+                                  it.init,
+                                  pUnit.cpuInput.valid.get(),
+                                  pUnit.maxElements,
+                                  &it - m_vdata.data());
                         HIP_CHECK_EXC(
                             hipMemcpy(pUnit.gpuInput.valid.get(),
                                       pUnit.cpuInput.valid.get(),
@@ -1784,7 +1792,8 @@ namespace TensileLite
                                           m_vdata[i].init,
                                           (void*)((int8_t*)p.second.cpuInput.valid.get()
                                                   + gemmInitOffset),
-                                          tensors[i]);
+                                          tensors[i],
+                                          i);
                                 // FIXME: Should we init unused part to 0?
                                 if((problem.gemms[j].sparse() == 1
                                     && i == ContractionProblemGemm::TENSOR::A)
@@ -1895,7 +1904,8 @@ namespace TensileLite
                             initArray(p.first,
                                       m_vdata[i].init,
                                       p.second.cpuInput.valid.get(),
-                                      tensors[i]);
+                                      tensors[i],
+                                      i);
                             if((problem.sparse() == 1 && i == ContractionProblemGemm::TENSOR::A)
                                || (problem.sparse() == 2 && i == ContractionProblemGemm::TENSOR::B))
                             {
@@ -2005,7 +2015,9 @@ namespace TensileLite
             case InitMode::UniformLowPrecision:
                 return "uniform_low_precision";
             // Free / Count have no mxDataGenerator analogue; throw rather than
-            // silently fall through to an unrelated distribution.
+            // silently fall through to an unrelated distribution. Maf2_0 is not
+            // mapped yet: only its non-scaled (Double) part exists so far.
+            case InitMode::Maf2_0:
             case InitMode::Free:
             case InitMode::Count:
                 break;

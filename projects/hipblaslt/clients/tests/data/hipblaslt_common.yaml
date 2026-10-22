@@ -58,6 +58,7 @@ Datatypes:
         nan: 893
         norm_dist_one_special: 894
         uniform_low_precision: 999
+        maf2_0: 1000
   - hipblaslt_activation_type:
       bases: [ c_int ]
       attr:
