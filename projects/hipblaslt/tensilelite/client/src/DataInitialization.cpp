@@ -2016,7 +2016,7 @@ namespace TensileLite
                 return "uniform_low_precision";
             // Free / Count have no mxDataGenerator analogue; throw rather than
             // silently fall through to an unrelated distribution. Maf2_0 is not
-            // mapped yet: only its non-scaled (Double) part exists so far.
+            // mapped yet: only its non-scaled (Double, Float) part exists so far.
             case InitMode::Maf2_0:
             case InitMode::Free:
             case InitMode::Count:
