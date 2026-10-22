@@ -55,7 +55,7 @@ enum class hipblaslt_initialization
     norm_dist_one_special = 894,
     // Uniform random in [-6.0, 6.0] (full FP4 E2M1 range); ~4% zeros vs ~50% for hpl
     uniform_low_precision  = 999,
-    // MAF2.0 data init: N(0,1) for the non-scaled types (FP64, FP32 so far); deterministic,
+    // MAF2.0 data init: N(0,1) for the non-scaled types (FP64, FP32, BF16 so far); deterministic,
     // mxDataGenerator-style seeding (one mt19937 per OpenMP thread, seeded seed + tid)
     maf2_0 = 1000,
 };
