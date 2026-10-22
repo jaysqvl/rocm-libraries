@@ -39,9 +39,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from importlib.resources import files as resource_files
 from pathlib import Path
@@ -794,6 +796,103 @@ for line in open(src):
         ):
             with self.subTest(banner=banner):
                 self.assertEqual(G.flavor_of_clang(banner), flavor)
+
+
+@unittest.skipUnless(
+    hasattr(os, "killpg"), "needs POSIX process groups to tell what survived"
+)
+class ProbeTimeoutTest(unittest.TestCase):
+    """A probe that runs out of time leaves nothing running behind it.
+
+    The clang driver compiles in a child process, and a compile that never
+    finishes (llvm20 on `raw.ptr.buffer.load.async.lds` at -O0) used to outlive
+    its timeout: only the driver was killed, and the orphaned child spun at
+    full CPU until the host was rebooted, one per hanging probe per sweep.
+
+    The stub stands in for that driver: it starts a child that never exits,
+    records both pids, and never exits itself.
+    """
+
+    _HANGS_WITH_A_CHILD = """
+import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time\\nwhile True: time.sleep(1)"])
+with open({pids!r}, "a") as f:
+    f.write(f"{{os.getpid()}} {{child.pid}}\\n")
+while True:
+    time.sleep(1)
+"""
+
+    def _stub(self, name: str) -> tuple[str, Path]:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        pids = root / "pids"
+        path = root / name
+        path.write_text(
+            "#!/usr/bin/env python3\n" + self._HANGS_WITH_A_CHILD.format(pids=str(pids))
+        )
+        path.chmod(0o755)
+        self.addCleanup(self._kill_survivors, pids)
+        return str(path), pids
+
+    @staticmethod
+    def _started(pids: Path) -> list[int]:
+        return [int(p) for line in pids.read_text().split("\n") for p in line.split()]
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        stat = Path(f"/proc/{pid}/stat")
+        try:
+            # A zombie has exited and only waits to be reaped by its parent.
+            return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return True
+
+    def _survivors(self, pids: Path) -> list[int]:
+        # Killing is asynchronous: give the kernel a moment to deliver it.
+        deadline = time.monotonic() + 5
+        while True:
+            alive = [pid for pid in self._started(pids) if self._alive(pid)]
+            if not alive or time.monotonic() > deadline:
+                return alive
+            time.sleep(0.1)
+
+    def _kill_survivors(self, pids: Path) -> None:
+        """Keep a failing run of this test from leaking the processes it
+        started. Only the pids the stub recorded are touched."""
+        if not pids.exists():
+            return
+        for pid in self._started(pids):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_a_link_probe_timeout_ends_the_whole_compile(self):
+        clang, pids = self._stub("clang")
+        scratch = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, scratch, True)
+        status, _ = G._probe(
+            clang, scratch / "probe.ll", "gfx942", scratch / "probe.hsaco", timeout=2
+        )
+        self.assertEqual(status, G.STATUS_TOOLCHAIN_TIMEOUT)
+        self.assertEqual(len(self._started(pids)), 2, "stub did not start its child")
+        self.assertEqual(self._survivors(pids), [], "outlived the probe's timeout")
+
+    def test_a_name_check_timeout_ends_the_whole_opt_run(self):
+        opt, pids = self._stub("opt")
+        scratch = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, scratch, True)
+        with mock.patch.object(G, "PROBE_TIMEOUT_S", 2):
+            verdict = G._name_exists(opt, "declare void @llvm.nope()", scratch)
+        self.assertIsNone(verdict.exists)
+        self.assertEqual(verdict.status, G.STATUS_TOOLCHAIN_TIMEOUT)
+        # Two attempts, each a stub and its child.
+        self.assertEqual(len(self._started(pids)), 4, "stub did not start its child")
+        self.assertEqual(self._survivors(pids), [], "outlived the name check's timeout")
 
 
 class PartialSweepTest(unittest.TestCase):
