@@ -85,7 +85,7 @@ namespace TensileLite
         //   the maximum representable value of the target type. Only supported for
         //   low-precision packed types (FP4, FP6, BF6). Produces significantly fewer
         //   zeros than Random by covering the full representable range uniformly.
-        // Maf2_0 (28): MAF2.0 data init. N(0,1) for the non-scaled types (Double so far),
+        // Maf2_0 (28): MAF2.0 data init. N(0,1) for the non-scaled types (Double, Float so far),
         //   deterministic with mxDataGenerator-style seeding; problem-dependent so each
         //   problem's data does not depend on the other problems in the run.
         enum class InitMode
@@ -803,7 +803,8 @@ namespace TensileLite
             template <typename T>
             void initArrayMaf2_0(T* array, size_t elements, size_t tensorIndex)
             {
-                if constexpr(std::is_same_v<T, double>)
+                // Draws in double; Float rounds each draw to nearest.
+                if constexpr(std::is_same_v<T, double> || std::is_same_v<T, float>)
                 {
                     constexpr uint32_t baseSeed   = 1713573849u; // same as generateMXInput
                     constexpr int      maxThreads = 32;
@@ -815,7 +816,7 @@ namespace TensileLite
                         std::normal_distribution<double> dist(0.0, 1.0);
 #pragma omp for schedule(static)
                         for(size_t i = 0; i < elements; i++)
-                            array[i] = dist(gen);
+                            array[i] = static_cast<T>(dist(gen));
                     }
                 }
                 else

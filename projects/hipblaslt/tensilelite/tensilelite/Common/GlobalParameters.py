@@ -178,7 +178,7 @@ globalParameters["CSVMergeSameProblemID"] = False
 #       - Problem-Independent: 0=0, 1=1, 2=2, 3=rand, 4=Nan, 5=Infinity, 6=BadInput(Nan), 7=BadOutput(Inf), 16=RandomNarrow,
 #                              21=RandomNegPosLimited(-128~128 or -1~1), 23~26=Ind Cos/Sin Abs or Not
 #       - Problem-dependent: 8=SerialID, 9=SerialDim0, 10=SerialDim1, 11=Identity, 12~15= Cos/Sin, Abs or Not,
-#                            28=Maf2_0 (MAF2.0: N(0,1) for Double so far, fixed-seed, A/B/C get different seeds)
+#                            28=Maf2_0 (MAF2.0: N(0,1) for Double/Float so far, fixed-seed, A/B/C get different seeds)
 #       For A, B, C, D: All the InitMode (0~16) can be used
 #       For Alpha/Beta: Only problem-independent init (0~7, 16, 23~26) can be used,
 #                       problem-dependent init (8~15) would cause a exception (Invalid InitMode) in New Client

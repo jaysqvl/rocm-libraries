@@ -176,7 +176,7 @@ static uint32_t maf2_0_seed(ABC_dims abc, size_t batch_index)
 }
 
 // Fills the whole allocation (same extent as fill_batch, ld padding included) with N(0, 1) drawn
-// in double precision on the host, then copies it to the device.
+// in double precision on the host (rounded to nearest for float), then copies it to the device.
 template <typename T>
 static void maf2_0_fill_normal(
     T* A, size_t M, size_t N, size_t lda, size_t stride, size_t batch_count, uint32_t seed)
@@ -1063,7 +1063,7 @@ void hipblaslt_init_device(ABC_dims                 abc,
             }
             break;
         case hipblaslt_initialization::maf2_0:
-            if constexpr(std::is_same_v<T, double>)
+            if constexpr(std::is_same_v<T, double> || std::is_same_v<T, float>)
                 maf2_0_fill_normal(
                     A, M, N, lda, stride, batch_count, maf2_0_seed(abc, batch_index));
             else
