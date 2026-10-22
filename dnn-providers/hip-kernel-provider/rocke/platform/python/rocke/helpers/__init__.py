@@ -317,6 +317,7 @@ from .i4_dequant import (
 from .mx_scale import (
     apply_mx_scale,
     decode_mx_scale_e8m0,
+    fma_with_mx_scale_pair,
     load_and_decode_mx_scale_byte,
 )
 from .preshuffle import (
@@ -660,6 +661,7 @@ __all__ = [
     # MX (microscaling) shared-exponent helpers
     "apply_mx_scale",
     "decode_mx_scale_e8m0",
+    "fma_with_mx_scale_pair",
     "load_and_decode_mx_scale_byte",
     # preshuffled-B layout
     "PreshuffleBSpec",
