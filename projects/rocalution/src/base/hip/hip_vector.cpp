@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -1157,6 +1157,9 @@ namespace rocalution
                                   1,
                                   &index);
             CHECK_ROCBLAS_ERROR(status, __FILE__, __LINE__);
+
+            // rocBLAS returns a 1-based index
+            --index;
 
             copy_d2h(1, this->vec_ + index, &value);
         }
